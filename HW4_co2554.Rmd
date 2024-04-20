@@ -1,0 +1,342 @@
+---
+title: "Data Science II Homework 3"
+author: "Camille Okonkwo"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+    toc_depth: 2
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '2'
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyhead[R]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+editor_options: 
+  chunk_output_type: console
+--- 
+\newpage
+
+```{r setup, include=FALSE}
+library(tidyverse)
+
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo = T, message = FALSE, results='hide', warning = FALSE}
+library(tidymodels)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(party)
+library(partykit)
+library(gbm)
+library(ranger)
+library(pROC)
+set.seed(2)
+```
+\newpage
+
+# Question 1
+
+In this exercise, we will build tree-based models using the `College` data. The response variable is the out-of-state tuition (Outstate). Partition the data set into two parts: training data (80%) and test data (20%)
+
+```{r}
+college = read_csv("data/College.csv") |>
+  drop_na() |> 
+  select(-College)
+
+set.seed(2)
+
+# create a random split of 80% training and 20% test data
+data_split = initial_split(data = college, prop = 0.8)
+
+# partitioned datasets
+training_data = training(data_split)
+testing_data = testing(data_split)
+
+head(training_data)
+head(testing_data)
+
+# training data
+x = model.matrix(Outstate ~ ., training_data)[, -1] # matrix of predictors
+head(x)
+y = training_data$Outstate # vector of response
+
+# testing data
+x2 = model.matrix(Outstate ~ .,testing_data)[, -1] # matrix of predictors
+y2 = testing_data$Outstate # vector of response
+```
+\newpage
+## (a) Build a regression tree on the training data to predict the response. Create a plot of the tree.
+```{r}
+# setting a 10-fold cross-validation
+ctrl = trainControl(method = "cv", number = 10)
+
+set.seed(2)
+
+rpart.fit = train(Outstate ~ . ,
+                   training_data,
+                   method = "rpart",
+                   tuneGrid = data.frame(cp = exp(seq(-8,-1, length = 100))),
+                   trControl = ctrl)
+
+plot(rpart.fit, xTrans = log)
+
+# plot of the tree
+rpart.plot(rpart.fit$finalModel)
+```
+
+## (b) Perform random forest on the training data. Report the variable importance and the test error.
+```{r}
+# Try more if possible
+rf.grid = expand.grid(mtry = 1:16,
+                      splitrule = "variance",
+                      min.node.size = 1:6)
+
+set.seed(2)
+
+# regression random forest
+rf.fit = train(Outstate ~ . ,
+               data = training_data,
+               method = "ranger",
+               tuneGrid = rf.grid,
+               trControl = ctrl)
+
+ggplot(rf.fit, highlight = TRUE)
+rf.fit$bestTune
+
+
+set.seed(2)
+
+# variable importance
+rf2.final.per = ranger(Outstate ~.,
+                       data = training_data,
+                       mtry = rf.fit$bestTune[[1]],
+                       splitrule = "variance",
+                       min.node.size = rf.fit$bestTune[[3]],
+                       importance = "permutation",
+                       scale.permutation.importance = TRUE)
+
+barplot(sort(ranger::importance(rf2.final.per), decreasing = FALSE),
+        las = 2, horiz = TRUE, cex.names = 0.7,
+        col = colorRampPalette(colors = c("cyan", "blue"))(16))
+
+
+# test error
+pred.rf.fit = predict(rf.fit, newdata = testing_data)
+
+test.error.rf = mean((pred.rf.fit - y2)^2)
+```
+
+The test error for the random forest model is `r mean((pred.rf.fit - y2)^2)`.
+
+
+## (c) Perform boosting on the training data. Report the variable importance and the test error.
+```{r}
+gbm.grid = expand.grid(n.trees = c(10000,20000,30000,40000,50000),
+                       interaction.depth = 1:6,
+                       shrinkage = c(0.001,0.002,0.003),
+                       n.minobsinnode = c(1))
+set.seed(2)
+
+# boosting
+gbm.fit = train(Outstate ~ . ,
+                data = training_data,
+                method = "gbm",
+                tuneGrid = gbm.grid,
+                trControl = ctrl,
+                verbose = FALSE)
+
+ggplot(gbm.fit, highlight = TRUE)
+
+# variable importance
+summary(gbm.fit$finalModel, las = 2, cBars = 16, cex.names = 0.6)
+
+# test error
+pred.gbm.fit <- predict(gbm.fit, newdata = testing_data)
+
+test.error.gbm <- mean((pred.gbm.fit - y2)^2)
+```
+
+The test error for the gbm model is `r mean((pred.gbm.fit - y2)^2)`.
+\newpage
+# Question 2
+
+This problem is based on the data `auto.csv` in Homework 3.  The dataset contains 392 observations.
+
+The response variable is `mpg_cat`, which indicates whether the miles per gallon of a car is high or low. 
+
+The predictors are:
+
+  • `cylinders`: Number of cylinders between 4 and 8
+  
+  • `displacement`: Engine displacement (cu. inches)
+  
+  • `horsepower`: Engine horsepower
+  
+  • `weight`: Vehicle weight (lbs.)
+  
+  • `acceleration`: Time to accelerate from 0 to 60 mph (sec.)
+  
+  • `year`: Model year (modulo 100)
+  
+  • `origin`: Origin of car (1. American, 2. European, 3. Japanese)
+
+Split the dataset into two parts: training data (70%) and test data (30%).
+```{r}
+auto = read_csv("data/auto.csv") |> 
+  drop_na() |> 
+  mutate(
+    mpg_cat = as.factor(mpg_cat),
+    mpg_cat = forcats::fct_relevel(mpg_cat, c("low", "high")),
+    cylinders = as.factor(cylinders),
+    origin = as.factor(origin)
+  )
+
+set.seed(2)
+
+# create a random split of 70% training and 30% test data 
+data_split2 = initial_split(data = auto, prop = 0.7)
+
+# partitioned datasets
+training_data2 = training(data_split2)
+testing_data2 = testing(data_split2)
+
+head(training_data2)
+head(testing_data2)
+
+# training data
+x_1 = model.matrix(mpg_cat ~ ., training_data2)[, -1] # matrix of predictors
+head(x_1)
+y_1 = training_data2$mpg_cat # vector of response
+
+# testing data
+x_2 = model.matrix(mpg_cat ~ .,testing_data2)[, -1] # matrix of predictors
+y_2 = testing_data2$mpg_cat # vector of response
+```
+\newpage
+
+## (a) Build a classification tree using the training data, with `mpg_cat` as the response. Which tree size corresponds to the lowest cross-validation error? Is this the same as the tree size obtained using the 1SE rule?
+```{r classification}
+
+ctrl1 = trainControl(method = "cv",
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE)
+
+set.seed(2)
+
+# CART
+cart.fit = train(mpg_cat ~ . ,
+                  training_data2,
+                  method = "rpart",
+                  tuneGrid = data.frame(cp = exp(seq(-8,-1, len = 100))),
+                  trControl = ctrl1,
+                  metric = "ROC")
+
+plot(cart.fit, xTrans = log)
+cart.fit$bestTune
+
+rpart.plot(cart.fit$finalModel)
+
+# Which tree size corresponds to the lowest cross-validation error? Is this the same as the tree size obtained using the 1SE rule?
+
+# using the 1SE rule:
+ctrl2 = trainControl(method = "cv",
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     selectionFunction = "oneSE")
+
+set.seed(2)
+
+cart.fit2 = train(mpg_cat ~ . ,
+                  training_data2,
+                  method = "rpart",
+                  tuneGrid = data.frame(cp = exp(seq(-8,-1, len = 100))),
+                  trControl = ctrl2,
+                  metric = "ROC")
+plot(cart.fit2, xTrans = log)
+rpart.plot(cart.fit2$finalModel)
+
+cart.fit2$bestTune
+
+# resampling comparison
+rpart.plot(cart.fit2$finalModel)
+
+resamp = resamples(list(cart = cart.fit, oneSE = cart.fit2))
+summary(resamp)
+bwplot(resamp, metric = "ROC")
+
+# predicition
+cart.fit.pred <- predict(cart.fit, newdata = testing_data2, type = "prob")[,2]
+cart.fit2.pred <- predict(cart.fit2, newdata = testing_data2, type = "prob")[,2]
+
+# ROC curves (for AUC)
+roc.cart <- roc(testing_data2$mpg_cat, cart.fit.pred)
+roc.cart2 <- roc(testing_data2$mpg_cat, cart.fit2.pred)
+
+# AUC values
+auc <- c(roc.cart$auc[1], roc.cart2$auc[1])
+modelNames <- c("cart.fit", "cart.1se")
+
+# combined ROC curves
+ggroc(list(roc.cart, roc.cart2),
+      legacy.axes = TRUE) + 
+  scale_color_discrete(labels = paste0(modelNames, " (", round(auc,3),")"),
+                       name = "Models (AUC)") + geom_abline(intercept = 0, slope = 1, color = "grey")
+
+# missclassification error
+misclass = predict(cart.fit, newdata = testing_data2, type = "raw")
+misclass2 = predict(cart.fit2, newdata = testing_data2, type = "raw")
+# Convert character labels to binary
+misclass_binary <- ifelse(misclass == "low", 0, 1)
+misclass_binary2 <- ifelse(misclass2 == "low", 0, 1)
+# take the mean of the logical vector
+mean(misclass_binary)
+mean(misclass_binary2)
+```
+
+From the re-sampling summary, we can see the minSE model has the highest mean ROC, however the model using 1SE has the same median ROC. Both models however, have the same AUC and same misclassification error rate, indicating comparative predictive performance. Even when changing seeds, the tree sizes for both models are the same. The tree size for both trees is 6.
+
+\newpage
+## (b) Perform boosting on the training data and report the variable importance. Report the test data performance.
+```{r classification_boosting}
+# set grid
+gbmA.grid =
+  expand.grid(n.trees = c(3000,4000,5000,6000,7000), 
+              interaction.depth = 1:10,
+              shrinkage = c(0.001, 0.002, 0.003), 
+              n.minobsinnode = 1) 
+
+set.seed(2)
+
+# boosting
+gbmA.fit = train(mpg_cat ~ . ,
+                  training_data2,
+                  tuneGrid = gbmA.grid,
+                  trControl = ctrl1,
+                  method = "gbm",
+                  distribution = "adaboost",
+                  metric = "ROC",
+                  verbose = FALSE)
+
+ggplot(gbmA.fit, highlight = TRUE)
+
+# variable importance
+summary(gbmA.fit$finalModel, las = 2, cBars = 13, cex.names = 0.6)
+
+# test data performance (ROC): missclassification error
+misclass_gbmA = predict(gbmA.fit, newdata = testing_data2, type = "raw")
+
+# Convert character labels to binary
+misclass_binary_gbmA = ifelse(misclass_gbmA == "low", 0, 1)
+
+# take the mean of the logical vector
+mean(misclass_binary_gbmA)
+```
+
+The misclassification error rate for the gbmA model is `r mean(misclass_binary_gbmA)`
